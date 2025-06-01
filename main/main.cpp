@@ -15,8 +15,8 @@
 
 #include "roll_off_roof.h"
 
-#define SSID "MY_SSID"
-#define PASSWORD "MY_PASSWORD"
+#define SSID "SSID"
+#define PASSWORD "PASS"
 
 static const char *TAG = "main";
 
@@ -65,10 +65,9 @@ extern "C" void app_main(void) {
       WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, nullptr, nullptr));
 
   // Set WiFi configuration
-  wifi_config_t wifi_config = {.sta = {
-                                   .ssid = SSID,
-                                   .password = PASSWORD,
-                               }};
+  wifi_config_t wifi_config = {}; // Zero-initialize everything
+  strncpy((char *)wifi_config.sta.ssid, SSID, sizeof(wifi_config.sta.ssid));
+  strncpy((char *)wifi_config.sta.password, PASSWORD, sizeof(wifi_config.sta.password));
 
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
   ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
