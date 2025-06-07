@@ -3,6 +3,51 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include <cstring> // for strncpy
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "esp_timer.h"
+
+extern "C" {
+#include "VL53L1X_api.h"
+}
+
+#define MEASUREMENT_CYCLE_MS        (50)        // the timing budget for the VL53L1
+#define TIMER_PERIODIC_MS           (60)        // periodic timer for measurements
+
+QueueHandle_t vl53_evt_queue = NULL;
+uint16_t TOF = VL53L1_I2C_ADDRESS;
+int     range_mm = 0;
+int32_t measurement_cycle = 0;
+int64_t last_measurement = 0;
+esp_timer_handle_t tof_sensor_timer;   // collects measurements from the ToF sensor
+uint8_t RangeStatus = VL53L1_RANGESTATUS_NONE;
+
+static void periodic_tof_sensor(void* arg)
+{
+    VL53L1X_ERROR get_status;
+    int64_t update_measurement_time;
+    uint16_t Distance = -1;
+    bool error;
+
+    // mark the start time for this service routine
+    update_measurement_time = esp_timer_get_time();
+    measurement_cycle = update_measurement_time - last_measurement;
+    last_measurement = update_measurement_time;
+
+    // get the measurement and start a new measurement cycle
+    get_status = VL53L1X_GetAndRestartMeasurement(TOF, &RangeStatus, &Distance);
+
+    // determine if a measurement error happened
+    error = get_status != VL53L1_ERROR_NONE;
+    error = error || ( RangeStatus != VL53L1_RANGESTATUS_RANGE_VALID && 
+                       RangeStatus != VL53L1_RANGESTATUS_WRAP_TARGET_FAIL );
+
+    if (error)
+      range_mm = -1;
+    else
+      range_mm = Distance;
+}
 
 static const char *TAG = "RollOffRoof";
 
@@ -11,20 +56,49 @@ RollOffRoof::RollOffRoof() : SafetyMonitor()
 {
   _connected = false;
 
-  // Initialize TRIG pin
-  gpio_config_t io_conf = {};
-  io_conf.intr_type = GPIO_INTR_DISABLE;
-  io_conf.mode = GPIO_MODE_OUTPUT;
-  io_conf.pin_bit_mask = (1ULL << TRIG_PIN);
-  io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
-  io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
-  gpio_config(&io_conf);
-  gpio_set_level(TRIG_PIN, 0);
+  uint8_t model_id, module_type, sensorState = 0;
+  VL53L1X_ERROR status = 0;
 
-  // Initialize ECHO pin
-  io_conf.mode = GPIO_MODE_INPUT;
-  io_conf.pin_bit_mask = (1ULL << ECHO_PIN);
-  gpio_config(&io_conf);
+  // startup the I2C interface and scan for the devices
+  i2c_init();
+  i2c_scan();
+
+  // check the VL53L1 device and wait for it to boot
+  status = VL53L1_RdByte(TOF, 0x010F, &model_id);
+  printf("VL53L1X Model_ID: %X, status = %d\n", model_id, status );
+  status = VL53L1_RdByte(TOF, 0x0110, &module_type);
+  printf("VL53L1X Module_Type: %X, status = %d\n", module_type, status );
+  while ( sensorState == 0 ) {
+      status = VL53L1X_BootState(TOF, &sensorState);
+      vTaskDelay( 20 / portTICK_PERIOD_MS );
+  }
+  printf("VL53L1 device booted\n");
+
+  // initialize the ToF sensor
+  VL53L1X_SensorInit( TOF );
+
+  // 1=short (up to 1 M), 2=long (up to 4 M)
+  VL53L1X_SetDistanceMode(TOF, 1);
+
+  // in ms possible values [20, 50, 100, 200, 500]
+  VL53L1X_SetTimingBudgetInMs(TOF, MEASUREMENT_CYCLE_MS);       
+
+  // in ms, IM must be > = TB
+  VL53L1X_SetInterMeasurementInMs(TOF, 5 + MEASUREMENT_CYCLE_MS);   
+
+  // need to start the VL53L1 with a first request for measurement
+  printf("VL53L1X Ultra Lite Driver Example running ...\n");
+  VL53L1X_StartRanging(TOF);   
+
+  vTaskDelay( TIMER_PERIODIC_MS / portTICK_PERIOD_MS );
+
+  // create the periodic time and service routine
+  const esp_timer_create_args_t tof_sensor_timer_args = {
+      .callback = &periodic_tof_sensor,
+      .name = "tofsensor"
+  };
+  esp_timer_create( &tof_sensor_timer_args, &tof_sensor_timer );
+  esp_timer_start_periodic( tof_sensor_timer, TIMER_PERIODIC_MS * 1000 );
 }
 
 RollOffRoof::~RollOffRoof()
@@ -101,33 +175,13 @@ esp_err_t RollOffRoof::get_supportedactions(std::vector<std::string> &actions)
 
 float RollOffRoof::read_distance_cm()
 {
-    // Send a 10us pulse on TRIG_PIN
-    gpio_set_direction(TRIG_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_level(TRIG_PIN, 0);
-    esp_rom_delay_us(2);
-    gpio_set_level(TRIG_PIN, 1);
-    esp_rom_delay_us(10);
-    gpio_set_level(TRIG_PIN, 0);
+    printf( "\r range = %d mm, cycle = %4.1f ms, status = %u  ",
+                        range_mm, (float)measurement_cycle / 1000, RangeStatus);
 
-    // Listen on ECHO_PIN
-    gpio_set_direction(ECHO_PIN, GPIO_MODE_INPUT);
-
-    // Wait for ECHO to go high
-    int64_t start_time = esp_timer_get_time();
-    while (gpio_get_level(ECHO_PIN) == 0) {
-        if ((esp_timer_get_time() - start_time) > 100000) return -1; // Timeout
-    }
-
-    int64_t echo_start = esp_timer_get_time();
-    while (gpio_get_level(ECHO_PIN) == 1) {
-        if ((esp_timer_get_time() - echo_start) > 100000) return -1; // Timeout
-    }
-
-    int64_t echo_end = esp_timer_get_time();
-    if (echo_end < echo_start) return -1;  // Just in case
-
-    float pulse_duration = echo_end - echo_start; // in µs
-    return pulse_duration / 58.0; // cm
+    if (range_mm == -1)
+      return 666;
+    else
+      return range_mm/10; // cm
 }
 
 esp_err_t RollOffRoof::get_issafe(bool *issafe)
