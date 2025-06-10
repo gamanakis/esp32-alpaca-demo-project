@@ -36,6 +36,16 @@ i2c_device_config_t dev_cfg = {
     }
 };
 
+#define MEASUREMENT_CYCLE_MS        (50)        // the timing budget for the VL53L1
+#define TIMER_PERIODIC_MS           (60)        // periodic timer for measurements
+
+QueueHandle_t vl53_evt_queue = NULL;
+int range_mm = 0;
+int32_t measurement_cycle = 0;
+int64_t last_measurement = 0;
+esp_timer_handle_t tof_sensor_timer;   // collects measurements from the ToF sensor
+uint8_t RangeStatus = VL53L1_RANGESTATUS_NONE;
+
 i2c_master_bus_handle_t bus_handle;
 i2c_master_dev_handle_t dev_handle;
 
@@ -52,16 +62,6 @@ void i2c_scan(i2c_master_bus_handle_t bus_handle)
     }
     printf("\r\n");
 }
-
-#define MEASUREMENT_CYCLE_MS        (50)        // the timing budget for the VL53L1
-#define TIMER_PERIODIC_MS           (60)        // periodic timer for measurements
-
-QueueHandle_t vl53_evt_queue = NULL;
-int     range_mm = 0;
-int32_t measurement_cycle = 0;
-int64_t last_measurement = 0;
-esp_timer_handle_t tof_sensor_timer;   // collects measurements from the ToF sensor
-uint8_t RangeStatus = VL53L1_RANGESTATUS_NONE;
 
 static void periodic_tof_sensor(void* arg)
 {
