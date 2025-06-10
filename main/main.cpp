@@ -21,8 +21,8 @@
 static const char *TAG = "main";
 
 static void event_handler(void *arg, esp_event_base_t event_base,
-                          int32_t event_id, void *event_data) {
-
+                          int32_t event_id, void *event_data)
+{
   ESP_LOGI(TAG, "Event dispatched from event loop base=%s, event_id=%ld",
            event_base, event_id);
 
@@ -41,7 +41,8 @@ static void event_handler(void *arg, esp_event_base_t event_base,
   }
 }
 
-extern "C" void app_main(void) {
+extern "C" void app_main(void)
+{
   vTaskDelay(
       pdMS_TO_TICKS(5000)); // Delay to allow the serial monitor to connect
 
