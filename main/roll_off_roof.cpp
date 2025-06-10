@@ -12,11 +12,51 @@ extern "C" {
 #include "VL53L1X_api.h"
 }
 
+i2c_master_bus_config_t i2c_mst_config = {
+    .i2c_port = I2C_DEFAULT_PORT,  
+    .sda_io_num = I2C_DEFAULT_SDA,
+    .scl_io_num = I2C_DEFAULT_SCL,
+    .clk_source = I2C_CLK_SRC_DEFAULT,
+    .glitch_ignore_cnt = 7,
+    .intr_priority = 0,
+    .trans_queue_depth = 10,
+    .flags = {
+        .enable_internal_pullup = true,
+        .allow_pd = 0,
+      }
+};
+
+i2c_device_config_t dev_cfg = {
+    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+    .device_address = VL53L1_I2C_ADDRESS,
+    .scl_speed_hz = I2C_DEFAULT_FREQ,
+    .scl_wait_us = 0,
+    .flags = {
+      .disable_ack_check = 1,
+    }
+};
+
+i2c_master_bus_handle_t bus_handle;
+i2c_master_dev_handle_t dev_handle;
+
+void i2c_scan(i2c_master_bus_handle_t bus_handle)
+{
+    printf("\r\nI2C device scan: ");
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        esp_err_t ret = i2c_master_probe(bus_handle, addr, pdMS_TO_TICKS(100));
+
+        if (ret == ESP_OK) {
+            // Show 8-bit address for compatibility with old code
+            printf("0x%02X | ", addr);
+        }
+    }
+    printf("\r\n");
+}
+
 #define MEASUREMENT_CYCLE_MS        (50)        // the timing budget for the VL53L1
 #define TIMER_PERIODIC_MS           (60)        // periodic timer for measurements
 
 QueueHandle_t vl53_evt_queue = NULL;
-uint16_t TOF = VL53L1_I2C_ADDRESS;
 int     range_mm = 0;
 int32_t measurement_cycle = 0;
 int64_t last_measurement = 0;
@@ -36,7 +76,7 @@ static void periodic_tof_sensor(void* arg)
     last_measurement = update_measurement_time;
 
     // get the measurement and start a new measurement cycle
-    get_status = VL53L1X_GetAndRestartMeasurement(TOF, &RangeStatus, &Distance);
+    get_status = VL53L1X_GetAndRestartMeasurement(dev_handle, &RangeStatus, &Distance);
 
     // determine if a measurement error happened
     error = get_status != VL53L1_ERROR_NONE;
@@ -51,7 +91,6 @@ static void periodic_tof_sensor(void* arg)
 
 static const char *TAG = "RollOffRoof";
 
-
 RollOffRoof::RollOffRoof() : SafetyMonitor()
 {
   _connected = false;
@@ -60,35 +99,36 @@ RollOffRoof::RollOffRoof() : SafetyMonitor()
   VL53L1X_ERROR status = 0;
 
   // startup the I2C interface and scan for the devices
-  i2c_init();
-  i2c_scan();
+  ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &bus_handle));
+  i2c_scan(bus_handle);
+  ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &dev_handle));
 
   // check the VL53L1 device and wait for it to boot
-  status = VL53L1_RdByte(TOF, 0x010F, &model_id);
+  status = VL53L1_RdByte(dev_handle, 0x010F, &model_id);
   printf("VL53L1X Model_ID: %X, status = %d\n", model_id, status );
-  status = VL53L1_RdByte(TOF, 0x0110, &module_type);
+  status = VL53L1_RdByte(dev_handle, 0x0110, &module_type);
   printf("VL53L1X Module_Type: %X, status = %d\n", module_type, status );
   while ( sensorState == 0 ) {
-      status = VL53L1X_BootState(TOF, &sensorState);
+      status = VL53L1X_BootState(dev_handle, &sensorState);
       vTaskDelay( 20 / portTICK_PERIOD_MS );
   }
   printf("VL53L1 device booted\n");
 
   // initialize the ToF sensor
-  VL53L1X_SensorInit( TOF );
+  VL53L1X_SensorInit( dev_handle );
 
   // 1=short (up to 1 M), 2=long (up to 4 M)
-  VL53L1X_SetDistanceMode(TOF, 1);
+  VL53L1X_SetDistanceMode(dev_handle, 1);
 
   // in ms possible values [20, 50, 100, 200, 500]
-  VL53L1X_SetTimingBudgetInMs(TOF, MEASUREMENT_CYCLE_MS);       
+  VL53L1X_SetTimingBudgetInMs(dev_handle, MEASUREMENT_CYCLE_MS);
 
   // in ms, IM must be > = TB
-  VL53L1X_SetInterMeasurementInMs(TOF, 5 + MEASUREMENT_CYCLE_MS);   
+  VL53L1X_SetInterMeasurementInMs(dev_handle, 5 + MEASUREMENT_CYCLE_MS);
 
   // need to start the VL53L1 with a first request for measurement
   printf("VL53L1X Ultra Lite Driver Example running ...\n");
-  VL53L1X_StartRanging(TOF);   
+  VL53L1X_StartRanging(dev_handle);
 
   vTaskDelay( TIMER_PERIODIC_MS / portTICK_PERIOD_MS );
 
